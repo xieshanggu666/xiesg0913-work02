@@ -3,6 +3,7 @@ import Matter from 'matter-js';
 import { AudioEngine } from './audio/AudioEngine';
 import type { StepVoice, WeatherKind } from './audio/AudioEngine';
 import { MicRecorder } from './audio/MicRecorder';
+import { PerformanceRecorder } from './audio/PerformanceRecorder';
 import { Fragment } from './world/Fragment';
 import type { VoiceAudio } from './world/Fragment';
 import { NoteField } from './world/Notes';
@@ -58,6 +59,7 @@ export class Game {
   private canvasEl!: HTMLCanvasElement;
   private audio = new AudioEngine();
   private mic = new MicRecorder();
+  private performance = new PerformanceRecorder();
   private panel!: Panel;
   private weather = new Weather();
   private notes = new NoteField(SLOT_COUNT, SCALE);
@@ -150,6 +152,9 @@ export class Game {
       onDeleteSong: (id) => this.deleteSong(id),
       onExportSong: (id) => this.exportSong(id),
       onImportSong: (file) => void this.importSong(file),
+      onPerformanceStart: () => void this.startPerformance(),
+      onPerformanceStop: () => void this.stopPerformance(),
+      onPerformanceCancel: () => this.cancelPerformance(),
     });
     this.panel.setNotes(0, SLOT_COUNT);
     this.refreshSongList();
@@ -525,6 +530,10 @@ export class Game {
       this.panel.toast('录音结束后再开始听音挑战 🎙️');
       return;
     }
+    if (this.panel.performanceRecording) {
+      this.panel.toast('演奏录制结束后再开始听音挑战 🔴');
+      return;
+    }
     void this.audio.unlock();
 
     // 保留孩子原本的 6 格作品；挑战只临时借用碎片，退出后原位恢复
@@ -700,6 +709,10 @@ export class Game {
       this.panel.toast('先退出听音挑战，再录新声音 🎧');
       return;
     }
+    if (this.panel.performanceRecording) {
+      this.panel.toast('先停止录下演奏，再录声音碎片 🔴');
+      return;
+    }
     if (this.mic.recording) {
       await this.stopMic();
       return;
@@ -753,6 +766,66 @@ export class Game {
     } catch {
       this.panel.toast('这段声音没法用 😢');
     }
+  }
+
+  // ---------- 录下演奏 ----------
+
+  private async startPerformance(): Promise<void> {
+    if (this.challenge.active) {
+      this.panel.toast('先退出听音挑战，再录下演奏 🎧');
+      return;
+    }
+    if (this.panel.performanceRecording) return;
+    if (this.mic.recording) {
+      this.panel.toast('声音碎片录音结束后，再录下演奏 🎙️');
+      return;
+    }
+    if (this.restoring) {
+      this.panel.toast('正在打开作品，稍等一下再录 ⏳');
+      return;
+    }
+    // 不使用麦克风：AudioContext 必须先建立，混音总线才有引出点
+    try {
+      await this.audio.unlock();
+      this.performance.start(this.audio);
+    } catch {
+      this.panel.toast('这台设备不支持录下演奏 😢');
+      this.panel.resetPerformanceUI();
+      return;
+    }
+    this.panel.setPerformanceRecording(true);
+    this.panel.toast('🔴 演奏录制中：让孩子开始拼旋律吧，最长 60 秒');
+    this.performance.onMaxDuration(() => void this.stopPerformance(true));
+  }
+
+  private async stopPerformance(auto = false): Promise<void> {
+    if (!this.performance.recording) return;
+    this.performance.clearMaxTimer();
+    this.panel.setPerformanceStopping();
+    try {
+      const result = await this.performance.stop();
+      if (!result) {
+        this.panel.resetPerformanceUI();
+        this.panel.toast(auto ? '录制到 60 秒上限，但没录到声音 😢' : '录得太短啦，再试一次 ♪');
+        return;
+      }
+      this.panel.setPerformanceResult(result.blob, result.seconds);
+      this.panel.toast(
+        auto
+          ? '已录满 60 秒：试听一下，满意就下载 ⬇️'
+          : '录好啦：先试听，满意就下载 ⬇️'
+      );
+    } catch {
+      this.panel.resetPerformanceUI();
+      this.panel.toast('录制失败了，再试一次 😢');
+    }
+  }
+
+  /** 取消录制或放弃已录好的音频，不下载、不留文件 */
+  private cancelPerformance(): void {
+    this.performance.cancel();
+    this.panel.resetPerformanceUI();
+    this.panel.toast('已取消，没有保存录音 ♪');
   }
 
   // ---------- 天气 ----------
@@ -834,6 +907,10 @@ export class Game {
   private async openSong(id: string): Promise<void> {
     if (this.challenge.active) {
       this.panel.toast('先退出听音挑战，再打开作品 🎧');
+      return;
+    }
+    if (this.panel.performanceRecording) {
+      this.panel.toast('演奏录制结束后再打开作品 🔴');
       return;
     }
     if (this.restoring) return;

@@ -198,6 +198,88 @@ canvas {
   animation: pulse 1s infinite;
 }
 
+/* ---------- 录下演奏 ---------- */
+
+#panel .performance {
+  border-top: 1px dashed #b0c4d8;
+  padding-top: 10px;
+}
+
+#panel button.danger {
+  background: #fbe9e7;
+  color: #b71c1c;
+  font-weight: 700;
+}
+
+@media (hover: hover) {
+  #panel button.danger:hover {
+    background: #ffccbc;
+  }
+}
+
+#panel button.ghost {
+  flex: 0 0 auto;
+  width: 48px;
+  padding: 6px;
+}
+
+#perfTime {
+  font-variant-numeric: tabular-nums;
+}
+
+#perfAudio {
+  display: block;
+  width: 100%;
+  height: 36px;
+  margin-top: 8px;
+}
+
+#perfAudio[hidden] {
+  display: none;
+}
+
+/* 面板收起（手机上是底部抽屉）时仍能看到“正在录演奏” */
+#perfBadge {
+  position: fixed;
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #b71c1c;
+  font-size: 14px;
+  font-weight: 700;
+  padding: 7px 14px;
+  border-radius: 999px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+#perfBadge[hidden] {
+  display: none;
+}
+
+.perf-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #e53935;
+  animation: pulse 1s infinite;
+}
+
+@media (max-width: 600px) {
+  #perfBadge {
+    top: auto;
+    bottom: calc(66px + env(safe-area-inset-bottom, 0px));
+    font-size: 13px;
+    padding: 6px 12px;
+  }
+}
+
 /* ---------- 本地作品集 ---------- */
 
 #panel .portfolio {
@@ -675,7 +757,8 @@ canvas {
   #panel,
   #panelToggle,
   #toast,
-  #mic.recording {
+  #mic.recording,
+  .perf-dot {
     transition: none;
     animation: none;
   }

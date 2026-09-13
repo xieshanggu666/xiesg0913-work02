@@ -20,6 +20,8 @@ export class AudioEngine {
 
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
+  /** 主音量之前的完整混音总线：内置音符、录音碎片、示范音与环境声都先汇到这里 */
+  private mix: GainNode | null = null;
   private musicBus: GainNode | null = null;
   private soloBus: GainNode | null = null;
   private waterFilter: BiquadFilterNode | null = null;
@@ -100,6 +102,18 @@ export class AudioEngine {
   async decode(data: ArrayBuffer): Promise<AudioBuffer> {
     await this.unlock();
     return this.ctx!.decodeAudioData(data);
+  }
+
+  /**
+   * 引出“完整演奏混音”用于录下演奏：取自主音量/静音之前的混音总线，
+   * 因此即便家长为了不外放而静音，内置音符、录音碎片与水/雨/风环境声
+   * 仍全部进入录音。返回的 node 需要由调用方在用完后 disconnect。
+   */
+  openPerformanceTap(): { stream: MediaStream; node: MediaStreamAudioDestinationNode } {
+    if (!this.ctx || !this.mix) throw new Error('audio not unlocked');
+    const node = this.ctx.createMediaStreamDestination();
+    this.mix.connect(node);
+    return { stream: node.stream, node };
   }
 
   /** 暂停/恢复顶部 6 步循环；暂停时取消已排上队列的循环音，避免与示范重叠 */
@@ -190,14 +204,19 @@ export class AudioEngine {
     this.master.gain.value = this.muted ? 0 : 0.9;
     this.master.connect(ctx.destination);
 
+    // 完整混音先汇入 mix，再接主音量：录音从 mix 引出，不受静音影响
+    this.mix = ctx.createGain();
+    this.mix.gain.value = 1;
+    this.mix.connect(this.master);
+
     this.musicBus = ctx.createGain();
     this.musicBus.gain.value = 0.8;
-    this.musicBus.connect(this.master);
+    this.musicBus.connect(this.mix);
 
     // 听音挑战示范走独立总线，循环音乐静音时仍能清晰播放
     this.soloBus = ctx.createGain();
     this.soloBus.gain.value = 0.9;
-    this.soloBus.connect(this.master);
+    this.soloBus.connect(this.mix);
 
     // 河流底噪：粉噪 → 低通，流速越快越响越亮
     const water = this.noiseSource();
@@ -208,7 +227,7 @@ export class AudioEngine {
     this.waterGain.gain.value = 0.05;
     water.connect(this.waterFilter);
     this.waterFilter.connect(this.waterGain);
-    this.waterGain.connect(this.master);
+    this.waterGain.connect(this.mix);
     water.start();
 
     // 雨：粉噪 → 高通
@@ -220,7 +239,7 @@ export class AudioEngine {
     this.rainGain.gain.value = 0;
     rain.connect(hp);
     hp.connect(this.rainGain);
-    this.rainGain.connect(this.master);
+    this.rainGain.connect(this.mix);
     rain.start();
 
     // 风：粉噪 → 带通，LFO 缓慢摆动中心频率
@@ -239,7 +258,7 @@ export class AudioEngine {
     lfoGain.connect(this.windFilter.frequency);
     wind.connect(this.windFilter);
     this.windFilter.connect(this.windGain);
-    this.windGain.connect(this.master);
+    this.windGain.connect(this.mix);
     wind.start();
     lfo.start();
 
@@ -419,7 +438,7 @@ export class AudioEngine {
     g.gain.exponentialRampToValueAtTime(0.035, t + 0.005);
     g.gain.exponentialRampToValueAtTime(0.0005, t + 0.09);
     osc.connect(g);
-    g.connect(this.master);
+    g.connect(this.mix ?? this.master);
     osc.start(t);
     osc.stop(t + 0.12);
   }

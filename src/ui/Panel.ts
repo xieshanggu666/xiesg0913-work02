@@ -1,4 +1,5 @@
 import type { WeatherKind } from '../audio/AudioEngine';
+import { PERFORMANCE_MAX_SECONDS } from '../audio/PerformanceRecorder';
 import type { SongSummary } from '../data/Portfolio';
 
 export interface PanelCallbacks {
@@ -17,6 +18,10 @@ export interface PanelCallbacks {
   onExportSong: (id: string) => void;
   /** 从备份文件导入一首作品 */
   onImportSong: (file: File) => void;
+  /** 录下演奏：开始 / 停止（生成可试听、下载的音频）/ 取消（丢弃） */
+  onPerformanceStart: () => void;
+  onPerformanceStop: () => void;
+  onPerformanceCancel: () => void;
 }
 
 const WEATHER_ICON: Record<WeatherKind, string> = { sunny: '☀️', rain: '🌧️', wind: '💨' };
@@ -38,6 +43,22 @@ export class Panel {
   private songList: HTMLUListElement;
   private songListEmpty: HTMLElement;
   private importInput: HTMLInputElement;
+
+  // ---------- 录下演奏 ----------
+  private perfTime: HTMLOutputElement;
+  private perfBadge: HTMLElement;
+  private perfBadgeTime: HTMLElement;
+  private perfIdleRow: HTMLElement;
+  private perfRecordingRow: HTMLElement;
+  private perfResultRow: HTMLElement;
+  private perfStopBtn: HTMLButtonElement;
+  private perfCancelRecBtn: HTMLButtonElement;
+  private perfPreviewBtn: HTMLButtonElement;
+  private perfAudio: HTMLAudioElement;
+  private perfResultUrl: string | null = null;
+  private perfResultBlob: Blob | null = null;
+  private perfTicker: number | null = null;
+  private perfState: 'idle' | 'recording' | 'stopping' | 'result' = 'idle';
 
   private dialog: HTMLElement;
   private nameInput: HTMLInputElement;
@@ -79,6 +100,36 @@ export class Panel {
       this.muted = !this.muted;
       this.syncMute();
       cb.onMute(this.muted);
+    });
+
+    // ---------- 录下演奏 ----------
+    this.perfTime = el<HTMLOutputElement>('perfTime');
+    this.perfBadge = el('perfBadge');
+    this.perfBadgeTime = el('perfBadgeTime');
+    this.perfIdleRow = el('perfIdleRow');
+    this.perfRecordingRow = el('perfRecordingRow');
+    this.perfResultRow = el('perfResultRow');
+    this.perfStopBtn = el<HTMLButtonElement>('perfStop');
+    this.perfCancelRecBtn = el<HTMLButtonElement>('perfCancelRec');
+    this.perfPreviewBtn = el<HTMLButtonElement>('perfPreview');
+    this.perfAudio = el<HTMLAudioElement>('perfAudio');
+
+    el<HTMLButtonElement>('perfStart').addEventListener('click', () => this.cb.onPerformanceStart());
+    this.perfStopBtn.addEventListener('click', () => this.cb.onPerformanceStop());
+    el<HTMLButtonElement>('perfCancelRec').addEventListener('click', () => this.cb.onPerformanceCancel());
+    el<HTMLButtonElement>('perfDiscard').addEventListener('click', () => this.cb.onPerformanceCancel());
+    this.perfPreviewBtn.addEventListener('click', () => this.togglePerformancePreview());
+    el<HTMLButtonElement>('perfDownload').addEventListener('click', () => this.downloadPerformance());
+    // 原生控件/自动播放结束后，把按钮文字同步回“试听”
+    this.perfAudio.addEventListener('ended', () => {
+      this.perfPreviewBtn.textContent = '▶️ 试听';
+    });
+    this.perfAudio.addEventListener('pause', () => {
+      if (this.perfAudio.ended) return;
+      this.perfPreviewBtn.textContent = '▶️ 试听';
+    });
+    this.perfAudio.addEventListener('play', () => {
+      this.perfPreviewBtn.textContent = '⏸️ 暂停';
     });
 
     const panel = el('panel');
@@ -153,6 +204,142 @@ export class Panel {
     this.micBtn.textContent = on ? '⏺️ 停止录音' : '🎙️ 录一段声音';
     this.micBtn.setAttribute('aria-pressed', String(on));
     this.micBtn.setAttribute('aria-label', on ? '停止录音' : '录一段声音');
+  }
+
+  // ---------- 录下演奏 ----------
+
+  get performanceRecording(): boolean {
+    return this.perfState === 'recording' || this.perfState === 'stopping';
+  }
+
+  /** 开始录制：显示计时（面板内 + 收起面板时的红点），旧的试听结果会被丢弃 */
+  setPerformanceRecording(on: boolean): void {
+    if (on) {
+      this.releasePerformanceResult();
+      this.perfState = 'recording';
+      this.perfIdleRow.hidden = true;
+      this.perfResultRow.hidden = true;
+      this.perfRecordingRow.hidden = false;
+      this.perfStopBtn.disabled = false;
+      this.perfCancelRecBtn.disabled = false;
+      this.perfBadge.hidden = false;
+      this.updatePerfTick(0);
+      this.startPerfTicker();
+    } else {
+      this.stopPerfTicker();
+      this.perfBadge.hidden = true;
+    }
+  }
+
+  /** 停止处理中：禁用按钮，避免家长重复点 */
+  setPerformanceStopping(): void {
+    this.perfState = 'stopping';
+    this.perfStopBtn.disabled = true;
+    this.perfCancelRecBtn.disabled = true;
+  }
+
+  /** 停止成功：展示试听 / 下载 / 放弃 */
+  setPerformanceResult(blob: Blob, seconds: number): void {
+    this.stopPerfTicker();
+    this.perfState = 'result';
+    this.perfResultBlob = blob;
+    this.perfResultUrl = URL.createObjectURL(blob);
+    this.perfAudio.src = this.perfResultUrl;
+    this.perfAudio.hidden = false;
+    this.perfPreviewBtn.textContent = '▶️ 试听';
+    this.perfTime.textContent = `${Panel.fmtClock(seconds)} / ${Panel.fmtClock(PERFORMANCE_MAX_SECONDS)}`;
+    this.perfRecordingRow.hidden = true;
+    this.perfIdleRow.hidden = true;
+    this.perfResultRow.hidden = false;
+    this.perfBadge.hidden = true;
+  }
+
+  /** 回到初始态：取消录制、放弃录音或录音失败（太短）时调用 */
+  resetPerformanceUI(): void {
+    this.stopPerfTicker();
+    this.releasePerformanceResult();
+    this.perfState = 'idle';
+    this.perfRecordingRow.hidden = true;
+    this.perfResultRow.hidden = true;
+    this.perfIdleRow.hidden = false;
+    this.perfStopBtn.disabled = false;
+    this.perfCancelRecBtn.disabled = false;
+    this.perfBadge.hidden = true;
+    this.perfTime.textContent = `0:00 / ${Panel.fmtClock(PERFORMANCE_MAX_SECONDS)}`;
+  }
+
+  private togglePerformancePreview(): void {
+    if (!this.perfResultUrl) return;
+    if (!this.perfAudio.paused) {
+      void this.perfAudio.pause();
+      return;
+    }
+    this.perfAudio.currentTime = 0;
+    void this.perfAudio.play().catch(() => {
+      // 某些环境拦截自动播放时退回原生控件，不影响下载
+      this.perfAudio.hidden = false;
+      this.perfPreviewBtn.textContent = '▶️ 试听';
+    });
+  }
+
+  private downloadPerformance(): void {
+    if (!this.perfResultBlob) return;
+    const d = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+    const a = document.createElement('a');
+    a.href = this.perfResultUrl!;
+    a.download = `河流之歌演奏-${stamp}.${this.performanceExt()}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  private performanceExt(): string {
+    const mime = this.perfResultBlob?.type ?? '';
+    if (mime.includes('mp4') || mime.includes('m4a')) return 'm4a';
+    if (mime.includes('ogg')) return 'ogg';
+    return 'webm';
+  }
+
+  /** 放掉上一次录音：暂停试听、断开 audio.src 并回收 ObjectURL */
+  private releasePerformanceResult(): void {
+    this.perfAudio.pause();
+    this.perfAudio.removeAttribute('src');
+    this.perfAudio.load();
+    this.perfAudio.hidden = true;
+    if (this.perfResultUrl) {
+      URL.revokeObjectURL(this.perfResultUrl);
+      this.perfResultUrl = null;
+    }
+    this.perfResultBlob = null;
+  }
+
+  private startPerfTicker(): void {
+    this.stopPerfTicker();
+    const start = performance.now();
+    this.perfTicker = window.setInterval(() => {
+      const elapsed = Math.min(PERFORMANCE_MAX_SECONDS, (performance.now() - start) / 1000);
+      this.updatePerfTick(elapsed);
+    }, 200);
+  }
+
+  private stopPerfTicker(): void {
+    if (this.perfTicker !== null) {
+      window.clearInterval(this.perfTicker);
+      this.perfTicker = null;
+    }
+  }
+
+  private updatePerfTick(elapsed: number): void {
+    const t = Panel.fmtClock(elapsed);
+    this.perfTime.textContent = `${t} / ${Panel.fmtClock(PERFORMANCE_MAX_SECONDS)}`;
+    this.perfBadgeTime.textContent = t;
+  }
+
+  private static fmtClock(seconds: number): string {
+    const s = Math.floor(seconds);
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   }
 
   setChallengeActive(active: boolean): void {
