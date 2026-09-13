@@ -4,7 +4,6 @@ export interface PerformanceResult {
   blob: Blob;
   /** 实际录到的秒数（不含取消） */
   seconds: number;
-  url: string;
 }
 
 /** 最长 60 秒，到点自动停止 */
@@ -64,7 +63,12 @@ export class PerformanceRecorder {
     }
   }
 
-  /** 停止并产出可试听/下载的结果；过短或空录音返回 null */
+  /**
+   * 停止并产出录音结果。不再用墙钟时长门槛拦截短录音——
+   * 是否可用由调用方（Game）用 decodeAudioData 判定：
+   * 只要浏览器产出了能解码、时长大于 0 的音频，即使不足 1 秒也可以试听/下载。
+   * 空块返回 null；停止后清理混音引出点。
+   */
   stop(): Promise<PerformanceResult | null> {
     return new Promise((resolve, reject) => {
       const rec = this.recorder;
@@ -85,11 +89,11 @@ export class PerformanceRecorder {
         const type = rec.mimeType || 'audio/webm';
         const blob = new Blob(this.chunks, { type });
         this.disconnectTap();
-        if (blob.size === 0 || seconds < 1) {
+        if (blob.size === 0) {
           resolve(null);
           return;
         }
-        resolve({ blob, seconds, url: URL.createObjectURL(blob) });
+        resolve({ blob, seconds });
       });
       rec.stop();
     });

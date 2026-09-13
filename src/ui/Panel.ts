@@ -247,7 +247,10 @@ export class Panel {
     this.perfAudio.src = this.perfResultUrl;
     this.perfAudio.hidden = false;
     this.perfPreviewBtn.textContent = '▶️ 试听';
-    this.perfTime.textContent = `${Panel.fmtClock(seconds)} / ${Panel.fmtClock(PERFORMANCE_MAX_SECONDS)}`;
+    // 不足 1 秒的短录音按一位小数展示，避免显示成 0:00
+    const durLabel =
+      seconds < 1 ? `${seconds.toFixed(1)} 秒` : Panel.fmtClock(seconds);
+    this.perfTime.textContent = `${durLabel} / ${Panel.fmtClock(PERFORMANCE_MAX_SECONDS)}`;
     this.perfRecordingRow.hidden = true;
     this.perfIdleRow.hidden = true;
     this.perfResultRow.hidden = false;

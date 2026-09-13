@@ -806,15 +806,26 @@ export class Game {
       const result = await this.performance.stop();
       if (!result) {
         this.panel.resetPerformanceUI();
-        this.panel.toast(auto ? '录制到 60 秒上限，但没录到声音 😢' : '录得太短啦，再试一次 ♪');
+        this.panel.toast(auto ? '录制到 60 秒上限，但没录到声音 😢' : '没录到声音，再试一次 ♪');
         return;
       }
-      this.panel.setPerformanceResult(result.blob, result.seconds);
-      this.panel.toast(
-        auto
-          ? '已录满 60 秒：试听一下，满意就下载 ⬇️'
-          : '录好啦：先试听，满意就下载 ⬇️'
-      );
+      // 以“能否解码 + 是否真有时长”判定有效性，而不是墙钟门槛：
+      // 家长快速停止（不足 1 秒）时，只要浏览器产出了可播放音频就允许试听/下载。
+      // 同时采用解码时长作为展示值，比操作计时更贴近实际音频。
+      let duration = 0;
+      try {
+        const decoded = await this.audio.decode(await result.blob.arrayBuffer());
+        duration = decoded.duration;
+      } catch {
+        duration = 0;
+      }
+      if (!(duration > 0)) {
+        this.panel.resetPerformanceUI();
+        this.panel.toast('这段录音还没能生成声音，再试一次 ♪');
+        return;
+      }
+      this.panel.setPerformanceResult(result.blob, duration);
+      this.panel.toast('录好啦：先试听，满意就下载 ⬇️');
     } catch {
       this.panel.resetPerformanceUI();
       this.panel.toast('录制失败了，再试一次 😢');
