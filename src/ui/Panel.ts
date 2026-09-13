@@ -59,6 +59,10 @@ export class Panel {
   private perfResultBlob: Blob | null = null;
   private perfTicker: number | null = null;
   private perfState: 'idle' | 'recording' | 'stopping' | 'result' = 'idle';
+  /** 每次发起试听自增，旧 Promise 的结果作废，避免与原生控件操作竞争 */
+  private perfPlayToken = 0;
+  /** 当前播放是否由“试听”按钮发起（决定成功后是否收回原生兜底条） */
+  private perfPlaybackFromButton = false;
 
   private dialog: HTMLElement;
   private nameInput: HTMLInputElement;
@@ -118,11 +122,13 @@ export class Panel {
     this.perfStopBtn.addEventListener('click', () => this.cb.onPerformanceStop());
     el<HTMLButtonElement>('perfCancelRec').addEventListener('click', () => this.cb.onPerformanceCancel());
     el<HTMLButtonElement>('perfDiscard').addEventListener('click', () => this.cb.onPerformanceCancel());
-    this.perfPreviewBtn.addEventListener('click', () => this.togglePerformancePreview());
+    this.perfPreviewBtn.addEventListener('click', () => void this.togglePerformancePreview());
     el<HTMLButtonElement>('perfDownload').addEventListener('click', () => this.downloadPerformance());
-    // 原生控件/自动播放结束后，把按钮文字同步回“试听”
+    // 播放状态同步到自定义按钮。只有“按钮发起的播放”才在成功后收回原生兜底条；
+    // 家长直接操作兜底播放器时保持它可见。
     this.perfAudio.addEventListener('ended', () => {
       this.perfPreviewBtn.textContent = '▶️ 试听';
+      this.perfPlayToken++;
     });
     this.perfAudio.addEventListener('pause', () => {
       if (this.perfAudio.ended) return;
@@ -130,6 +136,7 @@ export class Panel {
     });
     this.perfAudio.addEventListener('play', () => {
       this.perfPreviewBtn.textContent = '⏸️ 暂停';
+      if (this.perfPlaybackFromButton) this.perfAudio.hidden = true;
     });
 
     const panel = el('panel');
@@ -238,14 +245,15 @@ export class Panel {
     this.perfCancelRecBtn.disabled = true;
   }
 
-  /** 停止成功：展示试听 / 下载 / 放弃 */
+  /** 停止成功：展示试听 / 下载 / 放弃（原生播放器仅在播放被拦截时才亮出） */
   setPerformanceResult(blob: Blob, seconds: number): void {
     this.stopPerfTicker();
     this.perfState = 'result';
     this.perfResultBlob = blob;
     this.perfResultUrl = URL.createObjectURL(blob);
     this.perfAudio.src = this.perfResultUrl;
-    this.perfAudio.hidden = false;
+    this.perfAudio.hidden = true;
+    this.perfPlaybackFromButton = false;
     this.perfPreviewBtn.textContent = '▶️ 试听';
     // 不足 1 秒的短录音按一位小数展示，避免显示成 0:00
     const durLabel =
@@ -271,18 +279,35 @@ export class Panel {
     this.perfTime.textContent = `0:00 / ${Panel.fmtClock(PERFORMANCE_MAX_SECONDS)}`;
   }
 
-  private togglePerformancePreview(): void {
+  private async togglePerformancePreview(): Promise<void> {
     if (!this.perfResultUrl) return;
+    // 正在播放 → 暂停（从中间位置暂停，下次从此处继续）
     if (!this.perfAudio.paused) {
-      void this.perfAudio.pause();
+      this.perfAudio.pause();
       return;
     }
-    this.perfAudio.currentTime = 0;
-    void this.perfAudio.play().catch(() => {
-      // 某些环境拦截自动播放时退回原生控件，不影响下载
+    // 已播完再点：从头开始；中途暂停再点：继续播放
+    if (this.perfAudio.ended || this.perfAudio.currentTime >= this.perfAudio.duration) {
+      this.perfAudio.currentTime = 0;
+    }
+    const token = ++this.perfPlayToken;
+    this.perfPlaybackFromButton = true;
+    try {
+      await this.perfAudio.play();
+    } catch (err) {
+      if (token !== this.perfPlayToken) return; // 已被后续操作取代（含 AbortError）
+      // 浏览器拦截了脚本播放（自动播放策略/锁屏等）：亮出带 controls 的原生播放器，
+      // 家长点它自带的播放键一定能播（属于元素上的直接用户手势）；按钮也保留可再试。
+      this.perfPlaybackFromButton = false;
       this.perfAudio.hidden = false;
-      this.perfPreviewBtn.textContent = '▶️ 试听';
-    });
+      this.perfPreviewBtn.textContent = '🔄 再试一次';
+      const notAllowed = err instanceof DOMException && err.name === 'NotAllowedError';
+      this.toast(
+        notAllowed
+          ? '浏览器拦住了自动试听：点下面的播放键 ▶，或点「再试一次」'
+          : '暂时无法试听：可点下面的播放键 ▶，或直接下载保存'
+      );
+    }
   }
 
   private downloadPerformance(): void {
@@ -307,6 +332,8 @@ export class Panel {
 
   /** 放掉上一次录音：暂停试听、断开 audio.src 并回收 ObjectURL */
   private releasePerformanceResult(): void {
+    this.perfPlayToken++; // 让尚未落定的 play() Promise 全部失效
+    this.perfPlaybackFromButton = false;
     this.perfAudio.pause();
     this.perfAudio.removeAttribute('src');
     this.perfAudio.load();
